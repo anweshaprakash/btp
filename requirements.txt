@@ -1,0 +1,10 @@
+numpy>=1.24
+pandas>=1.5
+yfinance>=0.2.65
+hmmlearn>=0.3.3
+scikit-learn>=1.2
+matplotlib>=3.6
+plotly>=5.15
+torch>=2.0
+tqdm
+joblib
