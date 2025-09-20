@@ -1,3 +1,6 @@
+# ============================
+# File: requirements.txt
+# ============================
 numpy>=1.24
 pandas>=1.5
 yfinance>=0.2.65
@@ -8,3 +11,17 @@ plotly>=5.15
 torch>=2.0
 tqdm
 joblib
+vaderSentiment
+newspaper3k
+lxml[html_clean]
+requests
+beautifulsoup4
+faiss-cpu 
+transformers>=4.0.0 
+sentence-transformers  
+finbert-embedding>=0.1.1 
+newsapi-python  
+python-dotenv>=1.0.0
+statsmodels>=0.14.0
+pandas-datareader>=0.10.0
+
