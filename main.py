@@ -1,196 +1,211 @@
-"""
-main.py
-
-Run the full pipeline:
-- Fetch data
-- Preprocess features
-- Train HMM and decode regimes
-- Build datasets for LSTM baseline and hybrid (with HMM probs)
-- Train both models and evaluate RMSE
-- Save plots to outputs/figures
-"""
+# ============================
+# File: main.py
+# ============================
 
 import os
 from datetime import datetime
-import numpy as np
 import pandas as pd
-
+import numpy as np
+import math
 import data_pipeline as dp
+import news_pipeline as npip
+import feature_engineering as fe
 import hmm_model as hm
 import lstm_model as lm
 import visualization as viz
+from macroeconomic_pipeline import fetch_macro_data
+from timeseries_lstm import RegimeConditionedLSTM, TimeSeriesLSTMDataset, train_regime_lstm
 
-from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import DataLoader
+import statsmodels.api as sm
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
 
-# ----------------------------
-# User-configurable parameters
-# ----------------------------
-TICKER = "SPY"               # or "BTC-USD", "AAPL"
-START = "2015-01-01"
-END = "2025-08-31"
-VOL_WINDOW = 20
-HMM_FEATURES = ['ret', 'vol_roll']  # features used to train HMM
-N_STATES = 3
-SEQ_LEN = 20
-BATCH_SIZE = 64
-EPOCHS = 30
-DEVICE = "cpu"  # or "cuda" if available
-OUTPUT_DIR = "outputs"
-FIG_DIR = os.path.join(OUTPUT_DIR, "figures")
-MODEL_DIR = os.path.join(OUTPUT_DIR, "models")
-os.makedirs(FIG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
+# ---------------------------
+# 0) Config for Hyperparameter Tuning
+# ---------------------------
+config = {
+    "TICKER": "RELIANCE.NS",
+    "START": "2022-01-01",
+    "END": "2025-09-18",
+    "VOL_WINDOW": 20,
+    "N_STATES": 3,
+    "SEQ_LEN": 20,
+    "BATCH": 32,
+    "EPOCHS": 20,
+    "LEARNING_RATE": 1e-3,
+    "HIDDEN_DIM": 64,
+    "NUM_LAYERS": 2,
+    "DEVICE": "cpu"
+}
 
-# ----------------------------
-# 1) Fetch + preprocess
-# ----------------------------
-print("Fetching data...")
-df_price = dp.fetch_data(TICKER, START, END)
-df = dp.compute_features(df_price, vol_window=VOL_WINDOW, normalize=False)
-# drop NaNs if any remain
-df = df.dropna().copy()
+OUTDIR = "outputs"
+FIGDIR = os.path.join(OUTDIR, "figures")
+MODELDIR = os.path.join(OUTDIR, "models")
+os.makedirs(FIGDIR, exist_ok=True)
+os.makedirs(MODELDIR, exist_ok=True)
 
-# ----------------------------
-# 2) HMM baseline
-# ----------------------------
-print("Fitting HMM...")
-hmm_model, scaler = hm.fit_hmm(df, HMM_FEATURES, n_states=N_STATES)
-df_dec = hm.decode_regimes(hmm_model, scaler, df, HMM_FEATURES)
+# ---------------------------
+# 1) Price data & Technical Indicators
+# ---------------------------
+print("Fetching price data...")
+df_price = dp.fetch_price(config["TICKER"], config["START"], config["END"])
+df_feat = dp.compute_features(df_price, vol_window=config["VOL_WINDOW"])
 
-# Save model
-hm.save_model(hmm_model, scaler, os.path.join(MODEL_DIR, f"hmm_{TICKER}.pkl"))
+# ---------------------------
+# 2) News (categorized + sentiment)
+# ---------------------------
+print("Fetching & processing news...")
+query = config["TICKER"].split('.')[0]
+df_news = npip.fetch_news_combined(query, max_articles=1000)
 
-# ----------------------------
-# 3) Visualize HMM results
-# ----------------------------
-viz.plot_price_with_regimes(df_dec, close_col='Close', regime_col='regime', out_path=os.path.join(FIG_DIR, "price_regimes.png"))
-viz.plot_regime_probabilities(df_dec, prob_prefix='prob_state_', out_path=os.path.join(FIG_DIR, "regime_probs.png"))
-print("Saved regime plots to", FIG_DIR)
+if df_news is None or df_news.empty:
+    print("⚠️ No news found; continuing with price-only features.")
+    df_comb = df_feat.copy()
+else:
+    df_news['sentiment'] = pd.to_numeric(df_news['sentiment'], errors='coerce').fillna(0.0)
+    print(f"News fetched: {len(df_news)} articles. Categories: {df_news['category'].value_counts().to_dict()}")
+    df_comb = fe.align_price_news(df_feat, df_news)
 
-# ----------------------------
-# 4) Prepare datasets for LSTM
-# ----------------------------
-# baseline inputs: use 'ret' (and ret_ma or vol) as features
-# hybrid inputs: include HMM state probabilities
-df_for_model = df_dec.copy()
-# fill any small NaNs
-df_for_model = df_for_model.fillna(method='ffill').fillna(method='bfill')
+# ---------------------------
+# 3) Macroeconomic Data
+# ---------------------------
+print("Fetching macroeconomic data...")
+df_macro = fetch_macro_data(config["START"], config["END"])
+if not df_macro.empty:
+    df_comb = fe.align_macro_data(df_comb, df_macro)
+    
+# ---------------------------
+# 4) Hidden Markov Model (HMM) - Time Series Regime Detection
+# ---------------------------
+hmm_features = ['ret', 'vol_roll']
+print("Fitting rolling HMM on features:", hmm_features)
+df_dec = hm.fit_hmm_rolling(df_comb, hmm_features, n_states=config["N_STATES"], window_size=252, min_periods=100)
 
-# Choose baseline and hybrid input columns
-baseline_inputs = ['ret']  # you can add 'ret_ma', 'vol_roll' if desired
-hybrid_inputs = baseline_inputs + [f'prob_state_{i}' for i in range(N_STATES)]
+dates = df_dec.index.tolist()
+prices = df_dec['Close'].values
+regimes = df_dec['regime'].values
 
-target_col = 'ret'  # next-day return (we will predict scalar return)
+viz.plot_price_regimes(dates, prices, regimes, out_path=os.path.join(FIGDIR, "price_regimes.png"))
+regime_probs = df_dec[[f'prob_state_{i}' for i in range(config["N_STATES"])]].values
+viz.plot_regime_probabilities(dates, regime_probs, out_path=os.path.join(FIGDIR, "regime_probs.png"))
 
-# split into train/val/test by date (time-series split)
-train_ratio = 0.7
-val_ratio = 0.15
-n = len(df_for_model)
-i_train = int(n * train_ratio)
-i_val = int(n * (train_ratio + val_ratio))
+# ---------------------------
+# 5) Prepare datasets for LSTM
+# ---------------------------
+sentiment_and_regime_cols = [col for col in df_dec.columns if 'sentiment' in col.lower() or 'prob_state' in col.lower() or 'regime' in col.lower()]
+for col in sentiment_and_regime_cols:
+    df_dec[col] = df_dec[col].shift(1)
 
-df_train = df_for_model.iloc[:i_train]
-df_val = df_for_model.iloc[i_train:i_val]
-df_test = df_for_model.iloc[i_val:]
+baseline_inputs = ['ret', 'ret_ma', 'vol_roll', 'rsi', 'macd', 'macd_signal', 'macd_hist', 'bollinger_upper', 'bollinger_lower', 'stoch_k', 'stoch_d']
+macro_inputs = list(df_macro.columns) if not df_macro.empty else []
 
-# create datasets
-train_ds_baseline = lm.TimeSeriesDataset(df_train, baseline_inputs, target_col, seq_len=SEQ_LEN)
-val_ds_baseline = lm.TimeSeriesDataset(df_val, baseline_inputs, target_col, seq_len=SEQ_LEN)
-test_ds_baseline = lm.TimeSeriesDataset(df_test, baseline_inputs, target_col, seq_len=SEQ_LEN)
+rich_sentiment_features = [
+    'sentiment_mean', 'sentiment_pos_count_3d', 'sentiment_neg_count_3d',
+    'sentiment_neutral_count_3d', 'sentiment_vol_3d', 'sentiment_vol_7d', 
+    'sentiment_momentum_3d', 'news_intensity_3d', 'news_intensity_7d',
+    'sentiment_vol_interaction'
+]
+for cat in ['finance', 'general', 'international', 'national', 'policy', 'geopolitics']:
+    rich_sentiment_features.extend([
+        f'sentiment_{cat}', f'sentiment_{cat}_strength', f'news_{cat}_ratio', f'sentiment_{cat}_vol_3d', f'news_count_{cat}'
+    ])
+    rich_sentiment_features.extend([f'finbert_prob_{p}' for p in ['negative', 'neutral', 'positive']])
 
-train_loader_base = DataLoader(train_ds_baseline, batch_size=BATCH_SIZE, shuffle=True)
-val_loader_base = DataLoader(val_ds_baseline, batch_size=BATCH_SIZE, shuffle=False)
-test_loader_base = DataLoader(test_ds_baseline, batch_size=BATCH_SIZE, shuffle=False)
+hybrid_inputs_raw = list(set(baseline_inputs + rich_sentiment_features + macro_inputs))
+hybrid_inputs = [col for col in hybrid_inputs_raw if col in df_dec.columns]
+missing_cols = [col for col in hybrid_inputs_raw if col not in df_dec.columns]
 
-# hybrid
-train_ds_hybrid = lm.TimeSeriesDataset(df_train, hybrid_inputs, target_col, seq_len=SEQ_LEN)
-val_ds_hybrid = lm.TimeSeriesDataset(df_val, hybrid_inputs, target_col, seq_len=SEQ_LEN)
-test_ds_hybrid = lm.TimeSeriesDataset(df_test, hybrid_inputs, target_col, seq_len=SEQ_LEN)
+if missing_cols:
+    print(f"⚠️ Skipping {len(missing_cols)} hybrid features because they are not in the DataFrame: {missing_cols}")
 
-train_loader_hybrid = DataLoader(train_ds_hybrid, batch_size=BATCH_SIZE, shuffle=True)
-val_loader_hybrid = DataLoader(val_ds_hybrid, batch_size=BATCH_SIZE, shuffle=False)
-test_loader_hybrid = DataLoader(test_ds_hybrid, batch_size=BATCH_SIZE, shuffle=False)
+df_ready = df_dec.ffill().bfill()
+scaler = StandardScaler()
 
-# ----------------------------
-# 5) Train baseline LSTM
-# ----------------------------
+train_end_idx = int(len(df_ready) * 0.7)
+df_ready.loc[:, baseline_inputs] = scaler.fit_transform(df_ready[baseline_inputs].fillna(0))
+df_ready.loc[:, hybrid_inputs] = scaler.fit_transform(df_ready[hybrid_inputs].fillna(0))
+
+n = len(df_ready)
+i_train = int(n * 0.7)
+i_val = int(n * 0.85)
+df_train = df_ready.iloc[:i_train].copy()
+df_val = df_ready.iloc[i_train:i_val].copy()
+df_test = df_ready.iloc[i_val:].copy()
+
+print(f"Data split: {len(df_train)} train, {len(df_val)} val, {len(df_test)} test")
+
+# Create data loaders
+train_ds_base = lm.TimeSeriesDataset(df_train, baseline_inputs, 'ret', seq_len=config["SEQ_LEN"])
+val_ds_base = lm.TimeSeriesDataset(df_val, baseline_inputs, 'ret', seq_len=config["SEQ_LEN"])
+test_ds_base = lm.TimeSeriesDataset(df_test, baseline_inputs, 'ret', seq_len=config["SEQ_LEN"])
+train_loader_base = DataLoader(train_ds_base, batch_size=config["BATCH"], shuffle=True)
+val_loader_base = DataLoader(val_ds_base, batch_size=config["BATCH"], shuffle=False)
+test_loader_base = DataLoader(test_ds_base, batch_size=config["BATCH"], shuffle=False)
+
+train_ds_hyb = lm.TimeSeriesDataset(df_train, hybrid_inputs, 'ret', seq_len=config["SEQ_LEN"])
+val_ds_hyb = lm.TimeSeriesDataset(df_val, hybrid_inputs, 'ret', seq_len=config["SEQ_LEN"])
+test_ds_hyb = lm.TimeSeriesDataset(df_test, hybrid_inputs, 'ret', seq_len=config["SEQ_LEN"])
+train_loader_hyb = DataLoader(train_ds_hyb, batch_size=config["BATCH"], shuffle=True)
+val_loader_hyb = DataLoader(val_ds_hyb, batch_size=config["BATCH"], shuffle=False)
+test_loader_hyb = DataLoader(test_ds_hyb, batch_size=config["BATCH"], shuffle=False)
+
+regime_features = [col for col in [f'prob_state_{i}' for i in range(config["N_STATES"])] if col in df_train.columns]
+train_ds_ts = TimeSeriesLSTMDataset(df_train, hybrid_inputs, regime_features, 'ret', config["SEQ_LEN"])
+val_ds_ts = TimeSeriesLSTMDataset(df_val, hybrid_inputs, regime_features, 'ret', config["SEQ_LEN"])
+test_ds_ts = TimeSeriesLSTMDataset(df_test, hybrid_inputs, regime_features, 'ret', config["SEQ_LEN"])
+train_loader_ts = DataLoader(train_ds_ts, batch_size=config["BATCH"], shuffle=True)
+val_loader_ts = DataLoader(val_ds_ts, batch_size=config["BATCH"], shuffle=False)
+test_loader_ts = DataLoader(test_ds_ts, batch_size=config["BATCH"], shuffle=False)
+
+# ---------------------------
+# 6) Training and Evaluation
+# ---------------------------
+
+# Train models
 print("Training baseline LSTM...")
-input_dim_base = len(baseline_inputs)
-model_base = lm.LSTMModel(input_dim=input_dim_base, hidden_dim=64, num_layers=2)
-save_path_base = os.path.join(MODEL_DIR, "lstm_base.pth")
-model_base = lm.train_model(model_base, train_loader_base, val_loader_base, n_epochs=EPOCHS, lr=1e-3, device=DEVICE, save_path=save_path_base)
+model_base = lm.LSTMRegressor(input_dim=len(baseline_inputs), hidden_dim=config["HIDDEN_DIM"], num_layers=config["NUM_LAYERS"])
+model_base = lm.train_model(model_base, train_loader_base, val_loader_base, n_epochs=config["EPOCHS"], lr=config["LEARNING_RATE"], device=config["DEVICE"], save_path=os.path.join(MODELDIR, "lstm_base.pth"))
 
-# ----------------------------
-# 6) Train hybrid LSTM
-# ----------------------------
-print("Training hybrid LSTM (with HMM probs)...")
-input_dim_hybrid = len(hybrid_inputs)
-model_hybrid = lm.LSTMModel(input_dim=input_dim_hybrid, hidden_dim=64, num_layers=2)
-save_path_hybrid = os.path.join(MODEL_DIR, "lstm_hybrid.pth")
-model_hybrid = lm.train_model(model_hybrid, train_loader_hybrid, val_loader_hybrid, n_epochs=EPOCHS, lr=1e-3, device=DEVICE, save_path=save_path_hybrid)
+print("Training hybrid LSTM...")
+model_hyb = lm.LSTMRegressor(input_dim=len(hybrid_inputs), hidden_dim=config["HIDDEN_DIM"], num_layers=config["NUM_LAYERS"])
+model_hyb = lm.train_model(model_hyb, train_loader_hyb, val_loader_hyb, n_epochs=config["EPOCHS"], lr=config["LEARNING_RATE"], device=config["DEVICE"], save_path=os.path.join(MODELDIR, "lstm_hyb.pth"))
 
-# ----------------------------
-# 7) Evaluate on test set
-# ----------------------------
-print("Evaluating baseline...")
-res_base = lm.evaluate_model(model_base, test_loader_base, device=DEVICE)
+print("Training Regime-Conditioned LSTM...")
+model_ts = RegimeConditionedLSTM(input_dim=len(hybrid_inputs), regime_dim=len(regime_features), hidden_dim=config["HIDDEN_DIM"], num_layers=config["NUM_LAYERS"], output_dim=1)
+model_ts = train_regime_lstm(model_ts, train_loader_ts, val_loader_ts, n_epochs=config["EPOCHS"], lr=config["LEARNING_RATE"], device=config["DEVICE"], save_path=os.path.join(MODELDIR, "timeseries_lstm_regime.pth"))
+
+# Evaluate
+res_base = lm.evaluate_model(model_base, test_loader_base, device=config["DEVICE"])
+res_hyb = lm.evaluate_model(model_hyb, test_loader_hyb, device=config["DEVICE"])
+res_ts = lm.evaluate_model(model_ts, test_loader_ts, device=config["DEVICE"])
+
 print("Baseline RMSE:", res_base['rmse'])
+print("Hybrid RMSE:", res_hyb['rmse'])
+print("Regime-Conditioned RMSE:", res_ts['rmse'])
 
-print("Evaluating hybrid...")
-res_hybrid = lm.evaluate_model(model_hybrid, test_loader_hybrid, device=DEVICE)
-print("Hybrid RMSE:", res_hybrid['rmse'])
+dates_test = fe.dataset_target_dates(df_test, config["SEQ_LEN"])
+viz.plot_predictions(dates_test, res_base['trues'], res_base['preds'], out_path=os.path.join(FIGDIR, "pred_base.png"))
+viz.plot_predictions(dates_test, res_hyb['trues'], res_hyb['preds'], out_path=os.path.join(FIGDIR, "pred_hyb.png"))
 
-# Save prediction plots (align dates)
-# Note: TimeSeriesDataset maps each sample to the date corresponding to 'end+1' (target day)
-def get_sample_dates(df_slice: pd.DataFrame, seq_len: int):
-    # returns target dates for dataset constructed as above
-    dates = df_slice.index.to_list()
-    target_dates = []
-    for end in range(seq_len - 1, len(dates) - 1):
-        target_dates.append(dates[end + 1])  # target day
-    return target_dates
-
-test_dates = get_sample_dates(df_test, SEQ_LEN)
-
-viz.plot_predictions_vs_actual(test_dates, res_base['trues'], res_base['preds'], out_path=os.path.join(FIG_DIR, "pred_base.png"))
-viz.plot_predictions_vs_actual(test_dates, res_hybrid['trues'], res_hybrid['preds'], out_path=os.path.join(FIG_DIR, "pred_hybrid.png"))
-
-print("Saved prediction plots to", FIG_DIR)
-
-# ----------------------------
-# 8) Evaluate regime classification accuracy (proxy)
-# ----------------------------
-# There is no ground-truth for regimes. We'll create a simple heuristic "label":
-# bull if ret_ma > mean + std, bear if ret_ma < mean - std, else sideways.
-print("Evaluating regime accuracy vs heuristic (proxy)...")
-ret_ma = df_for_model['ret_ma']
-mu = ret_ma.mean()
-sigma = ret_ma.std()
-def heuristic_label(row):
-    if row['ret_ma'] > mu + 0.5 * sigma:
-        return 0  # bull
-    elif row['ret_ma'] < mu - 0.5 * sigma:
-        return 2  # bear
+# ---------------------------
+# 7) Save summary
+# ---------------------------
+with open(os.path.join(OUTDIR, "report.txt"), "w") as f:
+    f.write(f"Ticker: {config['TICKER']}\n")
+    f.write(f"Baseline RMSE: {res_base['rmse']}\n")
+    f.write(f"Hybrid RMSE: {res_hyb['rmse']}\n")
+    f.write(f"Regime-Conditioned RMSE: {res_ts['rmse']}\n")
+    # OLS is now part of a loop, so let's simplify the output
+    f.write("\nFinal OLS Regression: sentiment_mean vs next_ret\n")
+    reg_df = df_ready[['sentiment_mean', 'ret']].dropna()
+    reg_df['next_ret'] = reg_df['ret'].shift(-1)
+    if not reg_df.empty:
+        X, y = sm.add_constant(reg_df['sentiment_mean']), reg_df['next_ret']
+        ols_model = sm.OLS(y, X).fit()
+        f.write(ols_model.summary().as_text())
     else:
-        return 1  # sideways
+        f.write("Not enough data for overall sentiment regression.\n")
 
-df_for_model['heur_label'] = df_for_model.apply(heuristic_label, axis=1)
-# Align lengths & compare on test slice
-test_df = df_for_model.iloc[i_val:].copy()
-# If necessary drop initial rows for sequence length
-test_df = test_df.iloc[SEQ_LEN:]  # because dataset target starts after seq_len
-# compute accuracy between HMM regime and heuristic
-acc = (test_df['regime'].values == test_df['heur_label'].values).mean()
-print(f"Regime proxy accuracy (test window): {acc:.4f}")
-
-# Save a quick summary
-with open(os.path.join(OUTPUT_DIR, "report.txt"), "w") as f:
-    f.write(f"Ticker: {TICKER}\n")
-    f.write(f"HMM states: {N_STATES}\n")
-    f.write(f"Baseline RMSE: {res_base['rmse']:.6f}\n")
-    f.write(f"Hybrid RMSE: {res_hybrid['rmse']:.6f}\n")
-    f.write(f"Regime proxy accuracy: {acc:.4f}\n")
-
-print("Done. Outputs saved to", OUTPUT_DIR)
+print("✅ Done. Outputs in", OUTDIR)
