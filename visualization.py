@@ -1,79 +1,158 @@
+# ============================
+# File: visualization.py
+# ============================
 """
-visualization.py
-
-Plot:
-- Price chart with colored regimes
-- Regime probabilities over time
-- Prediction vs actual plot
+Visualization utilities for the financial sentiment analysis pipeline.
 """
 
-from typing import List
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+from typing import List, Optional
 import os
 
-
-def plot_price_with_regimes(df: pd.DataFrame, date_col: str = None, close_col: str = "Close", regime_col: str = "regime", out_path: str = None):
+def plot_predictions(dates: List[pd.Timestamp], true_values: np.ndarray, 
+                    predicted_values: np.ndarray, out_path: str, 
+                    title: str = "Predictions vs Actual") -> None:
     """
-    Plot price and color background by regime.
-    df must contain columns: Close and regime
+    Plot predictions vs actual values over time.
+    
+    Args:
+        dates: List of dates corresponding to the data points
+        true_values: Actual values
+        predicted_values: Predicted values
+        out_path: Path to save the plot
+        title: Title for the plot
     """
-    fig, ax = plt.subplots(figsize=(14, 6))
-    times = df.index
-    ax.plot(times, df[close_col], lw=1.2, label='Close')
+    plt.figure(figsize=(12, 6))
+    
+    # Plot actual vs predicted
+    plt.plot(dates, true_values, label='Actual', alpha=0.7, linewidth=2)
+    plt.plot(dates, predicted_values, label='Predicted', alpha=0.7, linewidth=2)
+    
+    # Add scatter points for better visibility
+    plt.scatter(dates, true_values, alpha=0.5, s=20, label='Actual Points')
+    plt.scatter(dates, predicted_values, alpha=0.5, s=20, label='Predicted Points')
+    
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Value', fontsize=12)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
-    # For each contiguous block of regime, color the background
-    regimes = df[regime_col].values
-    unique_regimes = np.unique(regimes)
-    colors = plt.cm.Set2(np.linspace(0, 1, len(unique_regimes)))
-    regime_color_map = {r: colors[i] for i, r in enumerate(unique_regimes)}
-    # fill background
-    start = 0
-    for i in range(1, len(regimes) + 1):
-        if i == len(regimes) or regimes[i] != regimes[i - 1]:
-            r = regimes[i - 1]
-            ax.axvspan(times[start], times[i - 1], color=regime_color_map[r], alpha=0.12)
-            start = i
-    ax.set_title("Price with HMM Regimes")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price")
-    ax.legend()
-    if out_path:
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    return fig
-
-
-def plot_regime_probabilities(df: pd.DataFrame, prob_prefix: str = "prob_state_", out_path: str = None):
+def plot_regime_probabilities(dates: List[pd.Timestamp], regime_probs: np.ndarray, 
+                            out_path: str, n_states: int = 3) -> None:
     """
-    Plot regime probabilities over time (stacked or separate).
+    Plot HMM regime probabilities over time.
+    
+    Args:
+        dates: List of dates
+        regime_probs: Array of regime probabilities (n_samples, n_states)
+        out_path: Path to save the plot
+        n_states: Number of regimes
     """
-    prob_cols = [c for c in df.columns if c.startswith(prob_prefix)]
-    if not prob_cols:
-        raise ValueError("No regime prob columns found with prefix " + prob_prefix)
-    fig, ax = plt.subplots(figsize=(14, 4))
-    for c in prob_cols:
-        ax.plot(df.index, df[c], label=c)
-    ax.set_title("HMM Regime Probabilities Over Time")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Probability")
-    ax.legend()
-    if out_path:
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    return fig
+    plt.figure(figsize=(14, 8))
+    
+    colors = ['red', 'blue', 'green', 'orange', 'purple'][:n_states]
+    labels = [f'Regime {i}' for i in range(n_states)]
+    
+    # Stack plot for regime probabilities
+    plt.stackplot(dates, *regime_probs.T, colors=colors, alpha=0.7, labels=labels)
+    
+    plt.title('HMM Regime Probabilities Over Time', fontsize=14, fontweight='bold')
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Probability', fontsize=12)
+    plt.legend(loc='upper right')
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
+def plot_price_regimes(dates: List[pd.Timestamp], prices: np.ndarray, 
+                      regimes: np.ndarray, out_path: str, 
+                      title: str = "Price with HMM Regimes") -> None:
+    """
+    Plot price data colored by HMM regimes.
+    
+    Args:
+        dates: List of dates
+        prices: Price data
+        regimes: Regime assignments
+        out_path: Path to save the plot
+        title: Title for the plot
+    """
+    plt.figure(figsize=(14, 8))
+    
+    # Create color map for regimes
+    colors = ['red', 'blue', 'green', 'orange', 'purple']
+    
+    # Plot price line
+    plt.plot(dates, prices, color='black', linewidth=1, alpha=0.8, label='Price')
+    
+    # Color background by regime
+    for i, (date, price) in enumerate(zip(dates, prices)):
+        if i < len(regimes):
+            regime = regimes[i]
+            color = colors[regime % len(colors)]
+            plt.axvline(x=date, color=color, alpha=0.1, linewidth=0.5)
+    
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Price', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
-def plot_predictions_vs_actual(dates, actuals, preds, out_path: str = None):
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(dates, actuals, label='Actual', lw=1)
-    ax.plot(dates, preds, label='Predicted', lw=1)
-    ax.set_title("Next-day Return: Actual vs Predicted")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Return")
-    ax.legend()
-    if out_path:
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    return fig
+def plot_sentiment_analysis(dates: List[pd.Timestamp], sentiment_data: dict, 
+                           out_path: str, title: str = "Sentiment Analysis") -> None:
+    """
+    Plot various sentiment metrics over time.
+    
+    Args:
+        dates: List of dates
+        sentiment_data: Dictionary with sentiment metrics
+        out_path: Path to save the plot
+        title: Title for the plot
+    """
+    plt.figure(figsize=(14, 10))
+    
+    n_metrics = len(sentiment_data)
+    colors = plt.cm.Set3(np.linspace(0, 1, n_metrics))
+    
+    for i, (metric_name, values) in enumerate(sentiment_data.items()):
+        plt.subplot(n_metrics, 1, i+1)
+        plt.plot(dates, values, color=colors[i], linewidth=2, label=metric_name)
+        plt.title(f'{metric_name}', fontsize=12, fontweight='bold')
+        plt.ylabel('Value', fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        if i == n_metrics - 1:  # Last subplot
+            plt.xlabel('Date', fontsize=12)
+        else:
+            plt.xticks([])
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
