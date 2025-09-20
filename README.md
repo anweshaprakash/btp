@@ -1,25 +1,46 @@
-# BTP: Regime-Aware Time Series Forecasting (HMM + LSTM)
+# BTP: Financial Time Series Regime-Switching Model
 
-This project implements a full pipeline for financial time-series modeling that combines Hidden Markov Models (HMM) for market regime detection with LSTM-based regression for next-day return prediction. It fetches OHLCV data via Yahoo Finance, extracts features, trains an HMM to infer regimes and probabilities, and trains two neural models: a baseline LSTM and a hybrid LSTM that incorporates HMM regime probabilities. The pipeline produces evaluation metrics and plots under `outputs/`.
+This project implements a comprehensive pipeline for financial time-series modeling that combines multiple data sources and advanced machine learning techniques. The system integrates:
+
+- **Price Data**: OHLCV data from Yahoo Finance with technical indicators
+- **News Sentiment**: Multi-source news collection with FinBERT sentiment analysis
+- **Macroeconomic Data**: Key economic indicators from FRED database
+- **Regime Detection**: Hidden Markov Models (HMM) for market regime identification
+- **Advanced Forecasting**: Multiple LSTM variants including regime-conditioned models
+
+The pipeline produces comprehensive evaluation metrics, visualizations, and trained models under `outputs/`.
 
 ## Features
-- **Data fetching**: Download OHLCV data from Yahoo Finance.
-- **Feature engineering**: Log-returns, rolling volatility, moving-average of returns, optional normalization.
-- **Regime detection**: Gaussian HMM on engineered features; outputs regime labels and per-state probabilities.
-- **Forecasting models**:
-  - Baseline LSTM using past returns.
-  - Hybrid LSTM using past returns + HMM regime probabilities.
-- **Visualization**: Price colored by regimes, regime probabilities over time, and predictions vs actuals.
-- **Reporting**: Saves metrics and a summary report.
+- **Multi-Source Data Collection**:
+  - OHLCV price data from Yahoo Finance with technical indicators (RSI, MACD, Bollinger Bands, Stochastic Oscillator)
+  - News sentiment analysis using FinBERT and VADER fallback
+  - Macroeconomic indicators from FRED (GDP, CPI, Unemployment Rate)
+- **Advanced Feature Engineering**:
+  - Technical indicators and rolling statistics
+  - News sentiment aggregation by category and time windows
+  - Macroeconomic data alignment and forward-filling
+  - Rich sentiment features including momentum and volatility measures
+- **Regime Detection**: Rolling Gaussian HMM for market regime identification with proper time-series handling
+- **Multiple Forecasting Models**:
+  - Baseline LSTM using technical indicators
+  - Hybrid LSTM incorporating news sentiment and macroeconomic data
+  - Regime-Conditioned LSTM with attention mechanisms
+- **Comprehensive Visualization**: Price regimes, sentiment analysis, predictions vs actuals
+- **Robust Evaluation**: Multiple model comparison with RMSE metrics and statistical analysis
 
 ## Repository Structure
-- `main.py`: Orchestrates the end-to-end pipeline.
-- `data_pipeline.py`: Fetches data and computes features.
-- `hmm_model.py`: Trains/decodes Gaussian HMM, save/load utilities.
-- `lstm_model.py`: Dataset, model, train/evaluate routines for LSTM.
-- `visualization.py`: Matplotlib plotting utilities.
-- `outputs/`: Generated figures, trained models, and a text report.
-- `requirements.txt`: Python package dependencies.
+- `main.py`: Main orchestration script that runs the complete pipeline
+- `data_pipeline.py`: Price data fetching and technical indicator computation
+- `news_pipeline.py`: Multi-source news collection and categorization
+- `finbert_sentiment.py`: FinBERT-based sentiment analysis for financial text
+- `macroeconomic_pipeline.py`: FRED database integration for economic indicators
+- `feature_engineering.py`: Data alignment and advanced feature creation
+- `hmm_model.py`: Rolling HMM implementation for regime detection
+- `lstm_model.py`: Standard LSTM models and evaluation utilities
+- `timeseries_lstm.py`: Regime-conditioned LSTM with attention mechanisms
+- `visualization.py`: Comprehensive plotting utilities for all data types
+- `outputs/`: Generated figures, trained models, and evaluation reports
+- `requirements.txt`: Complete Python package dependencies
 
 ## Installation
 1. Create a Python 3.10+ environment (recommended):
@@ -43,57 +64,141 @@ python main.py
 Outputs will be saved under `outputs/`.
 
 ## Configuration
-Adjust the top of `main.py` to change data source, training parameters, and output locations:
-- **Ticker and dates**:
-  - `TICKER` (e.g., `"SPY"`, `"AAPL"`, `"BTC-USD"`)
-  - `START`, `END` (YYYY-MM-DD)
-- **Features and models**:
-  - `VOL_WINDOW`: rolling volatility window (days)
-  - `HMM_FEATURES`: columns used by HMM (default: `['ret', 'vol_roll']`)
-  - `N_STATES`: number of HMM regimes
-  - `SEQ_LEN`: LSTM input sequence length
-  - `BATCH_SIZE`, `EPOCHS`, `DEVICE` ("cpu" or "cuda")
-- **Outputs**:
-  - `OUTPUT_DIR`, `FIG_DIR`, `MODEL_DIR`
+The main configuration is in `main.py` under the `config` dictionary. Key parameters:
+
+### Data Sources
+- **`TICKER`**: Stock symbol (e.g., `"RELIANCE.NS"`, `"SPY"`, `"AAPL"`)
+- **`START`, `END`**: Date range in YYYY-MM-DD format
+- **News Sources**: Google News RSS, GDELT API (automatic fallback)
+
+### Model Parameters
+- **`VOL_WINDOW`**: Rolling volatility window (default: 20 days)
+- **`N_STATES`**: Number of HMM regimes (default: 3)
+- **`SEQ_LEN`**: LSTM input sequence length (default: 20)
+- **`BATCH`**: Training batch size (default: 32)
+- **`EPOCHS`**: Training epochs (default: 20)
+- **`LEARNING_RATE`**: Adam optimizer learning rate (default: 1e-3)
+- **`HIDDEN_DIM`**: LSTM hidden dimension (default: 64)
+- **`NUM_LAYERS`**: LSTM layers (default: 2)
+- **`DEVICE`**: Training device ("cpu" or "cuda")
+
+### Feature Engineering
+- **Technical Indicators**: RSI, MACD, Bollinger Bands, Stochastic Oscillator
+- **Sentiment Features**: Category-specific sentiment, momentum, volatility measures
+- **Macroeconomic Data**: GDP, CPI, Unemployment Rate (from FRED)
+
+### Output Configuration
+- **`OUTDIR`**: Main output directory (default: "outputs")
+- **`FIGDIR`**: Figures directory (default: "outputs/figures")
+- **`MODELDIR`**: Models directory (default: "outputs/models")
 
 ## Data and Features
-From Yahoo Finance OHLCV, the pipeline derives:
-- `ret`: log return of `Close`
-- `vol_roll`: rolling standard deviation of `ret` (annualized)
-- `ret_ma`: simple moving average of returns
-Optional z-score normalization can be enabled in `compute_features(..., normalize=True)`.
+
+### Price Data Features
+From Yahoo Finance OHLCV data:
+- **`ret`**: Log return of Close price
+- **`vol_roll`**: Rolling standard deviation of returns (annualized)
+- **`ret_ma`**: Simple moving average of returns
+- **Technical Indicators**: RSI, MACD, Bollinger Bands, Stochastic Oscillator
+
+### News Sentiment Features
+From multi-source news collection:
+- **`sentiment_mean`**: Daily average sentiment score
+- **`news_count`**: Daily article count
+- **Category-specific sentiment**: Finance, general, international, national, policy, geopolitics
+- **Rich sentiment features**: Momentum, volatility, intensity measures
+- **FinBERT probabilities**: Negative, neutral, positive probability scores
+
+### Macroeconomic Features
+From FRED database:
+- **`GDP`**: Real Gross Domestic Product (quarterly, forward-filled)
+- **`CPI`**: Consumer Price Index (monthly, forward-filled)
+- **`Unemployment_Rate`**: Unemployment Rate (monthly, forward-filled)
+
+### Feature Engineering
+- Automatic forward/backward filling for missing values
+- Z-score normalization for all features
+- Time-aligned data aggregation across all sources
 
 ## Models
-- **HMM (hmmlearn.GaussianHMM)**
-  - Trained on `HMM_FEATURES`
-  - Produces `regime` labels and per-state probabilities `prob_state_0..k`
-  - Saved to `outputs/models/hmm_{TICKER}.pkl`
-- **LSTM (PyTorch)**
-  - Baseline inputs: `['ret']` (modifiable)
-  - Hybrid inputs: baseline + `prob_state_*`
-  - Best checkpoints saved to `outputs/models/lstm_base.pth` and `outputs/models/lstm_hybrid.pth`
+
+### Regime Detection
+- **Rolling HMM (hmmlearn.GaussianHMM)**
+  - Uses rolling windows to avoid lookahead bias
+  - Trained on technical features: `['ret', 'vol_roll']`
+  - Produces regime labels and state probabilities
+  - Implements proper time-series regime detection
+
+### Sentiment Analysis
+- **FinBERT (yiyanghkust/finbert-tone)**
+  - Finance-specific sentiment analysis
+  - Provides negative, neutral, positive probabilities
+  - Fallback to VADER sentiment if FinBERT fails
+  - Batch processing for efficiency
+
+### Forecasting Models
+- **Baseline LSTM (PyTorch)**
+  - Input: Technical indicators only
+  - Features: RSI, MACD, Bollinger Bands, Stochastic Oscillator
+  - Architecture: Multi-layer LSTM with dropout
+
+- **Hybrid LSTM (PyTorch)**
+  - Input: Technical indicators + news sentiment + macroeconomic data
+  - Features: All baseline features plus sentiment and macro indicators
+  - Enhanced with rich sentiment features and category-specific analysis
+
+- **Regime-Conditioned LSTM (PyTorch)**
+  - Advanced architecture with attention mechanisms
+  - Uses HMM regime probabilities as conditioning context
+  - Multi-head attention between LSTM output and regime context
+  - Separate regime encoder and output layers
+
+### Model Persistence
+- HMM models: `outputs/models/hmm.pkl`
+- LSTM models: `outputs/models/lstm_base.pth`, `lstm_hyb.pth`
+- Regime-conditioned: `outputs/models/timeseries_lstm_regime.pth`
 
 ## Train/Validate/Test Split
 `main.py` performs a chronological split: 70% train, 15% validation, 15% test. `TimeSeriesDataset` uses sliding windows of length `SEQ_LEN` and predicts next-day return.
 
 ## Outputs
 Generated artifacts under `outputs/`:
-- `figures/price_regimes.png`: Price with regime shading.
-- `figures/regime_probs.png`: Regime probabilities over time.
-- `figures/pred_base.png`: Baseline LSTM predictions vs actuals.
-- `figures/pred_hybrid.png`: Hybrid LSTM predictions vs actuals.
-- `models/hmm_{TICKER}.pkl`: Trained HMM + scaler.
-- `models/lstm_base.pth`, `models/lstm_hybrid.pth`: Trained LSTM weights.
-- `report.txt`: Summary including RMSEs and a proxy regime accuracy metric.
+
+### Visualizations (`outputs/figures/`)
+- **`price_regimes.png`**: Price chart with HMM regime shading
+- **`regime_probs.png`**: HMM regime probabilities over time
+- **`pred_base.png`**: Baseline LSTM predictions vs actual returns
+- **`pred_hyb.png`**: Hybrid LSTM predictions vs actual returns
+
+### Trained Models (`outputs/models/`)
+- **`hmm.pkl`**: Trained HMM model with scaler
+- **`lstm_base.pth`**: Baseline LSTM model weights
+- **`lstm_hyb.pth`**: Hybrid LSTM model weights
+- **`timeseries_lstm_regime.pth`**: Regime-conditioned LSTM weights
+- **`lstm_vol_base.pth`**: Volatility-focused LSTM weights
+- **`lstm_vol_hybrid.pth`**: Hybrid volatility LSTM weights
+- **`timeseries_lstm_jump.pth`**: Jump detection LSTM weights
+
+### Reports (`outputs/`)
+- **`report.txt`**: Comprehensive evaluation report including:
+  - Model performance metrics (RMSE for all models)
+  - Statistical analysis results
+  - Sentiment regression analysis
+  - Data quality summaries
 
 ## Reproducibility and Tips
-- Ensure stable internet access for Yahoo Finance downloads.
-- If CUDA is available, set `DEVICE = "cuda"` in `main.py` for faster training.
-- Add `ret_ma` or `vol_roll` to `baseline_inputs` in `main.py` to enrich baseline features.
-- For different horizons, modify the dataset target or sequence construction in `lstm_model.py`.
+- **Internet Access**: Ensure stable connection for Yahoo Finance, FRED, and news API downloads
+- **GPU Acceleration**: Set `DEVICE = "cuda"` in `main.py` for faster training (if available)
+- **Feature Engineering**: Modify `baseline_inputs` and `hybrid_inputs` in `main.py` to experiment with different feature combinations
+- **News Sources**: The pipeline automatically falls back between Google News RSS and GDELT if one fails
+- **Sentiment Analysis**: FinBERT provides finance-specific sentiment; VADER is used as fallback
+- **Time Horizons**: Modify sequence construction in `lstm_model.py` for different prediction horizons
 
 ## Troubleshooting
-- "No data found": Check `TICKER` symbol and date range in `main.py`.
-- Empty/NaN features: Ensure sufficient history; `compute_features` drops the first return and forward/backward fills small gaps in `main.py`.
-- Matplotlib display issues: This project saves figures to disk; a display backend is not required.
-- CUDA errors: Fall back to CPU by setting `DEVICE = "cpu"`.
+- **"No data found"**: Check `TICKER` symbol and date range in `main.py`
+- **Empty/NaN features**: Ensure sufficient historical data; the pipeline handles missing values automatically
+- **News collection failures**: The system gracefully handles API failures and continues with available data
+- **FinBERT loading issues**: Automatic fallback to VADER sentiment analysis
+- **CUDA errors**: Set `DEVICE = "cpu"` in configuration
+- **Memory issues**: Reduce `BATCH` size or `SEQ_LEN` for large datasets
+- **FRED API limits**: Macroeconomic data fetching may be rate-limited; the pipeline handles this gracefully
